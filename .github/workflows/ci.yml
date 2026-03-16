@@ -1,14 +1,26 @@
 name: CI
-on: [push]
+
+env:
+  ZIG_VERSION: "0.15.2"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: |
-            sudo snap install zig --classic --edge
-            zig version
+
+      - name: Install Zig 0.15.2
+        run: bash .github/scripts/install-zig.sh "${ZIG_VERSION}"
+
       - name: non-blocking test
         run: zig build test -Dforce_blocking=false
       - name: blocking test
