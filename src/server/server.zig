@@ -1447,6 +1447,18 @@ pub const Conn = struct {
         self.lock.lock();
         defer self.lock.unlock();
 
+        if (comptime builtin.os.tag == .windows) {
+            for (vec) |iov| {
+                var written: usize = 0;
+                while (written < iov.len) {
+                    const n = try socketWrite(socket, iov.base[written..iov.len]);
+                    if (n == 0) return error.Closed;
+                    written += n;
+                }
+            }
+            return;
+        }
+
         var i: usize = 0;
         while (true) {
             var n = try std.posix.writev(socket, vec[i..]);
@@ -1530,14 +1542,25 @@ fn _handleHandshake(comptime H: type, worker: anytype, hc: *HandlerConn(H), ctx:
         return .{ false, false };
     }
 
-    const n = posix.read(hc.socket, buf[len..]) catch |err| {
-        switch (err) {
-            error.BrokenPipe, error.ConnectionResetByPeer => log.debug("({f}) handshake connection closed: {}", .{ conn.address, err }),
-            error.WouldBlock => {
-                std.debug.assert(blockingMode());
-                log.debug("({f}) handshake timeout", .{conn.address});
-            },
-            else => log.warn("({f}) handshake error reading from socket: {}", .{ conn.address, err }),
+    const n = socketRead(hc.socket, buf[len..]) catch |err| {
+        if (comptime builtin.os.tag == .windows) {
+            switch (err) {
+                error.ConnectionResetByPeer => log.debug("({f}) handshake connection closed: {}", .{ conn.address, err }),
+                error.WouldBlock => {
+                    std.debug.assert(blockingMode());
+                    log.debug("({f}) handshake timeout", .{conn.address});
+                },
+                else => log.warn("({f}) handshake error reading from socket: {}", .{ conn.address, err }),
+            }
+        } else {
+            switch (err) {
+                error.BrokenPipe, error.ConnectionResetByPeer => log.debug("({f}) handshake connection closed: {}", .{ conn.address, err }),
+                error.WouldBlock => {
+                    std.debug.assert(blockingMode());
+                    log.debug("({f}) handshake timeout", .{conn.address});
+                },
+                else => log.warn("({f}) handshake error reading from socket: {}", .{ conn.address, err }),
+            }
         }
         return .{ false, false };
     };
@@ -1783,13 +1806,27 @@ fn preHandOffWrite(conn: *Conn, response: []const u8) void {
 
     var pos: usize = 0;
     while (pos < response.len) {
-        const n = posix.write(socket, response[pos..]) catch return;
+        const n = socketWrite(socket, response[pos..]) catch return;
         if (n == 0) {
             // closed
             return;
         }
         pos += n;
     }
+}
+
+fn socketRead(socket: posix.socket_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) {
+        return posix.recv(socket, buf, 0);
+    }
+    return posix.read(socket, buf);
+}
+
+fn socketWrite(socket: posix.socket_t, buf: []const u8) !usize {
+    if (comptime builtin.os.tag == .windows) {
+        return posix.send(socket, buf, 0);
+    }
+    return posix.write(socket, buf);
 }
 
 fn timestamp() u32 {
