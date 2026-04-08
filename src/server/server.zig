@@ -408,7 +408,9 @@ pub fn Blocking(comptime H: type) type {
         // directly when integrating with an http server
         pub fn readLoop(self: *Self, hc: *HandlerConn(H)) !void {
             defer self.cleanupConn(hc);
-            try posix.setsockopt(hc.socket, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &Timeout.none);
+            if (shouldClearReceiveTimeout(builtin.os.tag)) {
+                try posix.setsockopt(hc.socket, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &Timeout.none);
+            }
 
             // In BlockingMode, we always assign a reader for the duration of the connection
             // In scenarios where client rarely send data, this is going to use up an unecessary amount
@@ -1829,6 +1831,13 @@ fn socketWrite(socket: posix.socket_t, buf: []const u8) !usize {
     return posix.write(socket, buf);
 }
 
+fn shouldClearReceiveTimeout(os_tag: std.Target.Os.Tag) bool {
+    // Regression: on Windows, resetting SO_RCVTIMEO to a zero timeval after the
+    // handshake can cause the next websocket read to fail immediately. Leave the
+    // handshake timeout in place there until the underlying socket behavior is fixed.
+    return os_tag != .windows;
+}
+
 fn timestamp() u32 {
     if (comptime @hasDecl(posix, "CLOCK") == false or posix.CLOCK == void) {
         return @intCast(std.time.timestamp());
@@ -1990,6 +1999,12 @@ test "Conn: close" {
         _ = try stream.readAtLeast(&buf, 7);
         try t.expectSlice(u8, &.{ 136, 5, 0, 0xea, 'b', 'y', 'e' }, buf[0..7]);
     }
+}
+
+test "shouldClearReceiveTimeout skips Windows" {
+    try t.expectEqual(false, shouldClearReceiveTimeout(.windows));
+    try t.expectEqual(true, shouldClearReceiveTimeout(.linux));
+    try t.expectEqual(true, shouldClearReceiveTimeout(.macos));
 }
 
 fn testStream(handshake: bool) !net.Stream {
