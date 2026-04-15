@@ -379,7 +379,9 @@ pub fn Blocking(comptime H: type) type {
                 errdefer self.cleanupConn(hc);
                 const timeout = self.handshake_timeout;
                 const deadline = timestamp() + timeout.sec;
-                try posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &timeout.timeval);
+                if (comptime builtin.os.tag != .windows) {
+                    try posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &timeout.timeval);
+                }
 
                 while (true) {
                     const compression, const ok = handleHandshake(H, self, hc, ctx);
@@ -409,7 +411,9 @@ pub fn Blocking(comptime H: type) type {
         pub fn readLoop(self: *Self, hc: *HandlerConn(H)) !void {
             defer self.cleanupConn(hc);
             if (shouldClearReceiveTimeout(builtin.os.tag)) {
-                try posix.setsockopt(hc.socket, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &Timeout.none);
+                if (comptime builtin.os.tag != .windows) {
+                    try posix.setsockopt(hc.socket, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &Timeout.none);
+                }
             }
 
             // In BlockingMode, we always assign a reader for the duration of the connection
@@ -1832,7 +1836,9 @@ fn preHandOffWrite(conn: *Conn, response: []const u8) void {
 
     const socket = conn.stream.handle;
     const timeout = std.mem.toBytes(posix.timeval{ .sec = 5, .usec = 0 });
-    posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &timeout) catch return;
+    if (comptime builtin.os.tag != .windows) {
+        posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &timeout) catch return;
+    }
 
     var pos: usize = 0;
     while (pos < response.len) {
@@ -1847,7 +1853,15 @@ fn preHandOffWrite(conn: *Conn, response: []const u8) void {
 
 fn socketRead(socket: posix.socket_t, buf: []u8) !usize {
     if (comptime builtin.os.tag == .windows) {
-        return posix.recv(socket, buf, 0);
+        while (true) {
+            const rc = std.c.recv(socket, buf.ptr, buf.len, 0);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                .AGAIN => return error.WouldBlock,
+                else => return error.SystemResources,
+            }
+        }
     }
     return posix.read(socket, buf);
 }
