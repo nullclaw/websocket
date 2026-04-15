@@ -317,27 +317,44 @@ pub fn Blocking(comptime H: type) type {
         pub fn run(self: *Self, listener: posix.socket_t, ctx: anytype) void {
             defer self.shutdown();
             while (true) {
-                var address: net.Address = undefined;
-                var address_len: posix.socklen_t = @sizeOf(net.Address);
-                const socket = while (true) {
-                    const rc = posix.system.accept(listener, &address.any, &address_len);
-                    switch (posix.errno(rc)) {
-                        .SUCCESS => break rc,
-                        .INTR => continue,
-                        .BADF, .INVAL, .NOTSOCK => {
-                            log.info("received shutdown signal", .{});
-                            return;
-                        },
-                        else => |err| {
-                            log.err("failed to accept socket: {}", .{err});
-                            continue;
-                        },
-                    }
+                const accepted = if (comptime builtin.os.tag == .windows) blk: {
+                    var server = net.Server{
+                        .listen_address = net.Address.parseIp("127.0.0.1", 0) catch unreachable,
+                        .stream = .{ .handle = listener },
+                    };
+                    break :blk server.accept() catch |err| {
+                        log.err("failed to accept socket: {}", .{err});
+                        continue;
+                    };
+                } else blk: {
+                    var address: net.Address = undefined;
+                    var address_len: posix.socklen_t = @sizeOf(net.Address);
+                    const socket = while (true) {
+                        const rc = posix.system.accept(listener, &address.any, &address_len);
+                        switch (posix.errno(rc)) {
+                            .SUCCESS => break @as(posix.socket_t, @intCast(rc)),
+                            .INTR => continue,
+                            .BADF, .INVAL, .NOTSOCK => {
+                                log.info("received shutdown signal", .{});
+                                return;
+                            },
+                            else => |err| {
+                                log.err("failed to accept socket: {}", .{err});
+                                continue;
+                            },
+                        }
+                    };
+                    break :blk net.Server.Connection{
+                        .stream = .{ .handle = socket },
+                        .address = address,
+                    };
                 };
+                const socket = accepted.stream.handle;
+                const address = accepted.address;
                 log.debug("({f}) connected", .{address});
 
                 const thread = std.Thread.spawn(.{}, Self.handleConnection, .{ self, socket, address, ctx }) catch |err| {
-                    _ = posix.system.close(socket);
+                    (net.Stream{ .handle = socket }).close();
                     log.err("({f}) failed to spawn connection thread: {}", .{ address, err });
                     continue;
                 };
