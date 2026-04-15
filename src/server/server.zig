@@ -1852,22 +1852,14 @@ fn preHandOffWrite(conn: *Conn, response: []const u8) void {
 
 fn socketRead(socket: posix.socket_t, buf: []u8) !usize {
     if (comptime builtin.os.tag == .windows) {
-        while (true) {
-            const rc = std.c.recv(socket, buf.ptr, buf.len, 0);
-            switch (posix.errno(rc)) {
-                .SUCCESS => return @intCast(rc),
-                .INTR => continue,
-                .AGAIN => return error.WouldBlock,
-                else => return error.SystemResources,
-            }
-        }
+        return (net.Stream{ .handle = socket }).read(buf);
     }
     return posix.read(socket, buf);
 }
 
 fn socketWrite(socket: posix.socket_t, buf: []const u8) !usize {
     if (comptime builtin.os.tag == .windows) {
-        return error.WouldBlock;
+        return (net.Stream{ .handle = socket }).write(buf);
     }
     while (true) {
         const rc = posix.system.write(socket, buf.ptr, buf.len);
