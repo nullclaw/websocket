@@ -926,9 +926,14 @@ const EPoll = struct {
     const EpollEvent = linux.epoll_event;
 
     fn init() !EPoll {
+        const rc = linux.epoll_create1(0);
+        const q = switch (posix.errno(rc)) {
+            .SUCCESS => @as(i32, @intCast(rc)),
+            else => |err| return posix.unexpectedErrno(err),
+        };
         return .{
             .event_list = undefined,
-            .q = try posix.epoll_create1(0),
+            .q = q,
         };
     }
 
@@ -938,18 +943,18 @@ const EPoll = struct {
 
     fn monitorAccept(self: *EPoll, fd: c_int) !void {
         var event = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .ptr = 0 } };
-        return std.posix.epoll_ctl(self.q, linux.EPOLL.CTL_ADD, fd, &event);
+        return epollCtl(self.q, linux.EPOLL.CTL_ADD, fd, &event);
     }
 
     fn monitorSignal(self: *EPoll, fd: c_int) !void {
         var event = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .ptr = 1 } };
-        return std.posix.epoll_ctl(self.q, linux.EPOLL.CTL_ADD, fd, &event);
+        return epollCtl(self.q, linux.EPOLL.CTL_ADD, fd, &event);
     }
 
     fn monitorRead(self: *EPoll, hc: anytype, comptime rearm: bool) !void {
         const op = if (rearm) linux.EPOLL.CTL_MOD else linux.EPOLL.CTL_ADD;
         var event = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.ONESHOT, .data = .{ .ptr = @intFromPtr(hc) } };
-        return posix.epoll_ctl(self.q, op, hc.socket, &event);
+        return epollCtl(self.q, op, hc.socket, &event);
     }
 
     fn wait(self: *EPoll, timeout_sec: ?i32) !Iterator {
@@ -964,11 +969,29 @@ const EPoll = struct {
             }
         }
 
-        const event_count = posix.epoll_wait(self.q, event_list, timeout);
+        const event_count = try epollWait(self.q, event_list, timeout);
         return .{
             .index = 0,
             .events = event_list[0..event_count],
         };
+    }
+
+    fn epollCtl(epoll_fd: i32, op: u32, fd: i32, event: *linux.epoll_event) !void {
+        switch (posix.errno(linux.epoll_ctl(epoll_fd, op, fd, event))) {
+            .SUCCESS => {},
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
+
+    fn epollWait(epoll_fd: i32, event_list: []linux.epoll_event, timeout: i32) !usize {
+        while (true) {
+            const rc = linux.epoll_wait(epoll_fd, event_list.ptr, @intCast(event_list.len), timeout);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                else => |err| return posix.unexpectedErrno(err),
+            }
+        }
     }
 
     const Iterator = struct {
