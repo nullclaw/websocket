@@ -322,7 +322,7 @@ pub fn Blocking(comptime H: type) type {
                 const socket = while (true) {
                     const rc = posix.system.accept(listener, &address.any, &address_len);
                     switch (posix.errno(rc)) {
-                        .SUCCESS => break @as(posix.socket_t, @intCast(rc)),
+                        .SUCCESS => break rc,
                         .INTR => continue,
                         .BADF, .INVAL, .NOTSOCK => {
                             log.info("received shutdown signal", .{});
