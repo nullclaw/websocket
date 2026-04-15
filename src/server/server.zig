@@ -319,13 +319,20 @@ pub fn Blocking(comptime H: type) type {
             while (true) {
                 var address: net.Address = undefined;
                 var address_len: posix.socklen_t = @sizeOf(net.Address);
-                const socket = posix.accept(listener, &address.any, &address_len, posix.SOCK.CLOEXEC) catch |err| {
-                    if (err == error.ConnectionAborted or err == error.SocketNotListening) {
-                        log.info("received shutdown signal", .{});
-                        return;
+                const socket = while (true) {
+                    const rc = posix.system.accept(listener, &address.any, &address_len);
+                    switch (posix.errno(rc)) {
+                        .SUCCESS => break @as(posix.socket_t, @intCast(rc)),
+                        .INTR => continue,
+                        .BADF, .INVAL, .NOTSOCK => {
+                            log.info("received shutdown signal", .{});
+                            return;
+                        },
+                        else => |err| {
+                            log.err("failed to accept socket: {}", .{err});
+                            continue;
+                        },
                     }
-                    log.err("failed to accept socket: {}", .{err});
-                    continue;
                 };
                 log.debug("({f}) connected", .{address});
 
@@ -2019,8 +2026,10 @@ fn testStream(handshake: bool) !net.Stream {
     const timeout = std.mem.toBytes(std.posix.timeval{ .sec = 0, .usec = 20_000 });
     const address = try net.Address.parseIp("127.0.0.1", 9292);
     const stream = try net.tcpConnectToAddress(address);
-    try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &timeout);
-    try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, &timeout);
+    if (comptime builtin.os.tag != .windows) {
+        try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &timeout);
+        try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, &timeout);
+    }
 
     if (handshake == false) {
         return stream;
