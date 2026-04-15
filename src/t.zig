@@ -1,8 +1,10 @@
 const std = @import("std");
 const proto = @import("proto.zig");
+const compat = @import("compat");
 
 const posix = std.posix;
 const ArrayList = std.ArrayList;
+const net = compat.net;
 
 const Message = proto.Message;
 
@@ -18,7 +20,7 @@ pub const expectSlice = std.testing.expectEqualSlices;
 
 pub fn getRandom() std.Random.DefaultPrng {
     var seed: u64 = undefined;
-    std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
+    compat.crypto.random.bytes(std.mem.asBytes(&seed));
     return std.Random.DefaultPrng.init(seed);
 }
 
@@ -145,44 +147,25 @@ pub const Writer = struct {
 
 pub const SocketPair = struct {
     writer: Writer,
-    client: std.net.Stream,
-    server: std.net.Stream,
+    client: net.Stream,
+    server: net.Stream,
 
     const Opts = struct {
         port: ?u16 = null,
     };
 
     pub fn init(opts: Opts) SocketPair {
-        var address = std.net.Address.parseIp("127.0.0.1", opts.port orelse 0) catch unreachable;
-        var address_len = address.getOsSockLen();
+        var address = net.Address.parseIp("127.0.0.1", opts.port orelse 0) catch unreachable;
+        var listener = address.listen(.{ .reuse_address = true }) catch unreachable;
+        defer listener.deinit();
 
-        const listener = posix.socket(address.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, posix.IPPROTO.TCP) catch unreachable;
-        defer posix.close(listener);
-
-        {
-            // setup our listener
-            posix.bind(listener, &address.any, address_len) catch unreachable;
-            posix.listen(listener, 1) catch unreachable;
-            posix.getsockname(listener, &address.any, &address_len) catch unreachable;
-        }
-
-        const client = posix.socket(address.any.family, posix.SOCK.STREAM, posix.IPPROTO.TCP) catch unreachable;
-        {
-            // connect the client
-            const flags = posix.fcntl(client, posix.F.GETFL, 0) catch unreachable;
-            _ = posix.fcntl(client, posix.F.SETFL, flags | posix.SOCK.NONBLOCK) catch unreachable;
-            posix.connect(client, &address.any, address_len) catch |err| switch (err) {
-                error.WouldBlock => {},
-                else => unreachable,
-            };
-            _ = posix.fcntl(client, posix.F.SETFL, flags) catch unreachable;
-        }
-
-        const server = posix.accept(listener, &address.any, &address_len, posix.SOCK.CLOEXEC) catch unreachable;
+        address = listener.listen_address;
+        const client = net.tcpConnectToAddress(address) catch unreachable;
+        const server = listener.accept() catch unreachable;
 
         return .{
-            .client = .{ .handle = client },
-            .server = .{ .handle = server },
+            .client = client,
+            .server = server.stream,
             .writer = Writer.init(),
         };
     }

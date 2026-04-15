@@ -1,9 +1,10 @@
 const std = @import("std");
 const proto = @import("../proto.zig");
 const buffer = @import("../buffer.zig");
+const std_compat = @import("compat");
 
 const ascii = std.ascii;
-const net = std.net;
+const net = @import("compat").net;
 const posix = std.posix;
 const tls = std.crypto.tls;
 const log = std.log.scoped(.websocket);
@@ -249,7 +250,7 @@ pub const Client = struct {
             } orelse {
                 reader.fill(stream) catch |err| switch (err) {
                     error.WouldBlock => return null,
-                    error.Closed, error.ConnectionResetByPeer, error.BrokenPipe, error.NotOpenForReading => {
+                    error.Closed, error.ConnectionResetByPeer, error.NotOpenForReading => {
                         @atomicStore(bool, &self._closed, true, .monotonic);
                         return error.Closed;
                     },
@@ -416,7 +417,7 @@ pub const Stream = struct {
             } else if (native_os == .wasi and !builtin.link_libc) {
                 _ = std.os.wasi.sock_shutdown(fd, .{ .WR = true, .RD = true });
             } else {
-                std.posix.shutdown(fd, .both) catch {};
+                _ = std.posix.system.shutdown(fd, std.posix.SHUT.RDWR);
             }
             tls_client.deinit();
         }
@@ -494,6 +495,9 @@ const TLSClient = struct {
     stream_writer: net.Stream.Writer,
     stream_reader: net.Stream.Reader,
     arena: std.heap.ArenaAllocator,
+    ca_bundle: Bundle = .empty,
+    ca_bundle_lock: std.Io.RwLock = .init,
+    has_ca_bundle: bool = false,
 
     fn init(allocator: Allocator, stream: net.Stream, config: *const Client.Config) !*TLSClient {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -502,8 +506,8 @@ const TLSClient = struct {
         const aa = arena.allocator();
 
         const bundle = config.ca_bundle orelse blk: {
-            var b = Bundle{};
-            try b.rescan(aa);
+            var b = Bundle.empty;
+            try b.rescan(aa, std_compat.io(), std.Io.Timestamp.now(std_compat.io(), .real));
             break :blk b;
         };
 
@@ -523,16 +527,30 @@ const TLSClient = struct {
             .client = undefined,
             .stream_writer = stream.writer(buf.ptr[0..buf_len][0..buf_len]),
             .stream_reader = stream.reader(buf.ptr[buf_len .. 2 * buf_len][0..buf_len]),
+            .ca_bundle = .empty,
+            .ca_bundle_lock = .init,
+            .has_ca_bundle = false,
         };
+        self.ca_bundle = bundle;
+        self.has_ca_bundle = true;
+        var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
+        std_compat.crypto.random.bytes(&entropy);
 
         self.client = try tls.Client.init(
-            self.stream_reader.interface(),
+            &self.stream_reader.interface,
             &self.stream_writer.interface,
             .{
-                .ca = .{ .bundle = bundle },
+                .ca = .{ .bundle = .{
+                    .gpa = aa,
+                    .io = std_compat.io(),
+                    .lock = &self.ca_bundle_lock,
+                    .bundle = &self.ca_bundle,
+                } },
                 .host = .{ .explicit = config.host },
                 .read_buffer = buf.ptr[2 * buf_len .. 3 * buf_len][0..buf_len],
                 .write_buffer = buf.ptr[3 * buf_len .. 4 * buf_len][0..buf_len],
+                .entropy = &entropy,
+                .realtime_now = std.Io.Timestamp.now(std_compat.io(), .real),
             },
         );
 
@@ -550,13 +568,13 @@ fn generateKey() [16]u8 {
         return [16]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
     }
     var key: [16]u8 = undefined;
-    std.crypto.random.bytes(&key);
+    std_compat.crypto.random.bytes(&key);
     return key;
 }
 
 fn generateMask() [4]u8 {
     var m: [4]u8 = undefined;
-    std.crypto.random.bytes(&m);
+    std_compat.crypto.random.bytes(&m);
     return m;
 }
 
@@ -619,7 +637,7 @@ const HandShakeReply = struct {
 
     fn read(buf: []u8, key: []const u8, opts: *const Client.HandshakeOpts, compression: bool, stream: anytype) !HandShakeReply {
         const timeout_ms = opts.timeout_ms;
-        const deadline = std.time.milliTimestamp() + timeout_ms;
+        const deadline = std_compat.time.milliTimestamp() + timeout_ms;
         try stream.readTimeout(timeout_ms);
 
         var pos: usize = 0;
@@ -727,7 +745,7 @@ const HandShakeReply = struct {
                 }
             }
 
-            if (std.time.milliTimestamp() > deadline) {
+            if (std_compat.time.milliTimestamp() > deadline) {
                 return error.Timeout;
             }
 

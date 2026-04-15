@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("compat").sync;
 
 const posix = std.posix;
 const ascii = std.ascii;
@@ -356,7 +357,7 @@ pub const Handshake = struct {
 };
 
 pub const Pool = struct {
-    mutex: std.Thread.Mutex,
+    mutex: sync.Mutex,
     available: usize,
     allocator: Allocator,
     buffer_size: usize,
@@ -660,7 +661,7 @@ fn testPool(p: *Pool) void {
         var hs = p.acquire() catch unreachable;
         std.debug.assert(hs.buf[0] == 0);
         hs.buf[0] = 255;
-        std.Thread.sleep(random.uintAtMost(u32, 100000));
+        @import("compat").thread.sleep(random.uintAtMost(u32, 100000));
         hs.buf[0] = 0;
         p.release(hs);
     }
