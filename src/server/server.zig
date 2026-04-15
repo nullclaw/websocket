@@ -1579,7 +1579,6 @@ fn _handleHandshake(comptime H: type, worker: anytype, hc: *HandlerConn(H), ctx:
     const n = socketRead(hc.socket, buf[len..]) catch |err| {
         if (comptime builtin.os.tag == .windows) {
             switch (err) {
-                error.ConnectionResetByPeer => log.debug("({f}) handshake connection closed: {}", .{ conn.address, err }),
                 error.WouldBlock => {
                     std.debug.assert(blockingMode());
                     log.debug("({f}) handshake timeout", .{conn.address});
