@@ -16,21 +16,7 @@ pub fn currentEnviron() std.process.Environ {
 
 fn environ() std.process.Environ {
     if (builtin.is_test) return std.testing.environ;
-    return switch (builtin.os.tag) {
-        .windows, .freestanding, .other => .{ .block = .global },
-        .wasi, .emscripten => if (builtin.link_libc) blk: {
-            const c_environ = std.c.environ;
-            var env_count: usize = 0;
-            while (c_environ[env_count] != null) : (env_count += 1) {}
-            break :blk .{ .block = .{ .slice = c_environ[0..env_count :null] } };
-        } else .{ .block = .global },
-        else => blk: {
-            const c_environ = std.c.environ;
-            var env_count: usize = 0;
-            while (c_environ[env_count] != null) : (env_count += 1) {}
-            break :blk .{ .block = .{ .slice = c_environ[0..env_count :null] } };
-        },
-    };
+    return .{ .block = .global };
 }
 
 pub const process = struct {
