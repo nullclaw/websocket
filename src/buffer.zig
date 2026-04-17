@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("compat").sync;
 
 const Allocator = std.mem.Allocator;
 
@@ -215,7 +216,7 @@ pub const Pool = struct {
     available: usize,
     buffers: [][]u8,
     allocator: Allocator,
-    mutex: std.Thread.Mutex,
+    mutex: sync.Mutex,
 
     pub fn init(allocator: Allocator, count: usize, buffer_size: usize) !Pool {
         const buffers = try allocator.alloc([]u8, count);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("compat").sync;
 
 const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
@@ -27,17 +28,12 @@ pub fn ThreadPool(comptime F: anytype) type {
     // []u8. But this ThreadPool is private and being used for 2 specific cases
     // that we control.
 
-    var fields: [ARG_COUNT]std.builtin.Type.StructField = undefined;
-    inline for (full_fields[0..ARG_COUNT], 0..) |field, index| fields[index] = field;
+    var arg_types: [ARG_COUNT]type = undefined;
+    inline for (full_fields[0..ARG_COUNT], 0..) |field, index| {
+        arg_types[index] = field.type;
+    }
 
-    const Args = comptime @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .is_tuple = true,
-            .fields = &fields,
-            .decls = &.{},
-        },
-    });
+    const Args = std.meta.Tuple(&arg_types);
 
     return struct {
         stopped: bool,
@@ -46,9 +42,9 @@ pub fn ThreadPool(comptime F: anytype) type {
         pending: usize,
         queue: []Args,
         threads: []Thread,
-        mutex: Thread.Mutex,
-        pull_cond: Thread.Condition,
-        push_cond: Thread.Condition,
+        mutex: sync.Mutex,
+        pull_cond: sync.Condition,
+        push_cond: sync.Condition,
         queue_end: usize,
         allocator: Allocator,
 
@@ -195,7 +191,7 @@ test "ThreadPool: small fuzz" {
         tp.spawn(.{1});
     }
     while (tp.empty() == false) {
-        std.Thread.sleep(std.time.ns_per_ms);
+        @import("compat").thread.sleep(std.time.ns_per_ms);
     }
     tp.deinit();
     try t.expectEqual(50_000, testSum);
@@ -209,7 +205,7 @@ test "ThreadPool: large fuzz" {
         tp.spawn(.{1});
     }
     while (tp.empty() == false) {
-        std.Thread.sleep(std.time.ns_per_ms);
+        @import("compat").thread.sleep(std.time.ns_per_ms);
     }
     tp.deinit();
     try t.expectEqual(50_000, testSum);
@@ -220,5 +216,5 @@ fn testIncr(c: u64, buf: []u8) void {
     std.debug.assert(buf.len == 512);
     _ = @atomicRmw(u64, &testSum, .Add, c, .monotonic);
     // let the threadpool queue get backed up
-    std.Thread.sleep(std.time.ns_per_us * 100);
+    @import("compat").thread.sleep(std.time.ns_per_us * 100);
 }

@@ -1,6 +1,8 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const t = @import("t.zig");
 const ws = @import("websocket.zig");
+const net = @import("compat").net;
 
 pub fn init() Testing {
     return Testing.init();
@@ -30,9 +32,11 @@ pub const Testing = struct {
         const pair = t.SocketPair.init(.{ .port = port });
         const timeout = std.mem.toBytes(std.posix.timeval{
             .sec = 0,
-            .usec = 50_000,
+            .usec = 250_000,
         });
-        std.posix.setsockopt(pair.client.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &timeout) catch unreachable;
+        if (comptime builtin.os.tag != .windows) {
+            std.posix.setsockopt(pair.client.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &timeout) catch unreachable;
+        }
 
         const aa = arena.allocator();
         const buffer_provider = aa.create(ws.buffer.Provider) catch unreachable;
@@ -53,7 +57,7 @@ pub const Testing = struct {
                 ._closed = false,
                 .started = 0,
                 .stream = pair.server,
-                .address = std.net.Address.parseIp("127.0.0.1", port) catch unreachable,
+                .address = net.Address.parseIp("127.0.0.1", port) catch unreachable,
             },
             .reader = reader,
             .received = std.ArrayList(ws.Message).init(aa),
@@ -96,7 +100,8 @@ pub const Testing = struct {
         return error.NotClosed;
     }
 
-    // we have a 50ms timeout on this socket. It's all localhost. We expect
+    // We keep a short read timeout on this localhost test socket, but allow
+    // enough headroom for slower CI and containerized runs.
     // to be able to read messages in that time.
     pub fn ensureMessage(self: *Testing) !void {
         if (self.received_index < self.received.items.len) {
@@ -131,7 +136,6 @@ pub const Testing = struct {
 // For these tests, we realy don't know if the server-side of the connection
 // is closed, so we try to close and ignore any errors.
 fn close(fd: std.posix.fd_t) void {
-    const builtin = @import("builtin");
     const native_os = builtin.os.tag;
     if (native_os == .windows) {
         return std.os.windows.CloseHandle(fd);

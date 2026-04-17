@@ -1,9 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const proto = @import("../proto.zig");
 const buffer = @import("../buffer.zig");
+const std_compat = @import("compat");
 
 const ascii = std.ascii;
-const net = std.net;
+const net = @import("compat").net;
 const posix = std.posix;
 const tls = std.crypto.tls;
 const log = std.log.scoped(.websocket);
@@ -79,7 +81,7 @@ pub const Client = struct {
 
     pub fn init(allocator: Allocator, config: Config) !Client {
         if (config.compression != null) {
-            log.err("Compression is disabled as part of the 0.15 upgrade. I do hope to re-enable it soon.", .{});
+            log.err("Compression is temporarily disabled in this branch. I do hope to re-enable it soon.", .{});
             return error.InvalidConfiguraion;
         }
 
@@ -123,7 +125,7 @@ pub const Client = struct {
             ._closed = false,
             ._own_bp = own_bp,
             ._mask_fn = config.mask_fn,
-            ._compression_opts = null, //TODO: ZIG 0.15
+            ._compression_opts = null, // TODO: re-enable compression support
             ._reader = Reader.init(reader_buf, buffer_provider, null),
         };
     }
@@ -247,16 +249,21 @@ pub const Client = struct {
                 self.close(.{ .code = 1002 }) catch unreachable;
                 return err;
             } orelse {
-                reader.fill(stream) catch |err| switch (err) {
-                    error.WouldBlock => return null,
-                    error.Closed, error.ConnectionResetByPeer, error.BrokenPipe, error.NotOpenForReading => {
-                        @atomicStore(bool, &self._closed, true, .monotonic);
-                        return error.Closed;
-                    },
-                    else => {
-                        self.close(.{ .code = 1002 }) catch unreachable;
-                        return err;
-                    },
+                reader.fill(stream) catch |err| {
+                    const read_err: anyerror = err;
+                    if (read_err == error.Timeout or read_err == error.WouldBlock) {
+                        return null;
+                    }
+                    switch (read_err) {
+                        error.Closed, error.ConnectionResetByPeer, error.NotOpenForReading => {
+                            @atomicStore(bool, &self._closed, true, .monotonic);
+                            return error.Closed;
+                        },
+                        else => {
+                            self.close(.{ .code = 1002 }) catch unreachable;
+                            return err;
+                        },
+                    }
                 };
                 continue;
             };
@@ -405,36 +412,12 @@ pub const Stream = struct {
     }
 
     pub fn close(self: *Stream) void {
-        const fd = self.stream.handle;
-        const builtin = @import("builtin");
-        const native_os = builtin.os.tag;
-
         if (self.tls_client) |tls_client| {
             // Shutdown the socket first, so readLoop() can exit, before tls_client's buffers are freed
-            if (native_os == .windows) {
-                _ = std.os.windows.ws2_32.shutdown(fd, std.os.windows.ws2_32.SD_BOTH);
-            } else if (native_os == .wasi and !builtin.link_libc) {
-                _ = std.os.wasi.sock_shutdown(fd, .{ .WR = true, .RD = true });
-            } else {
-                std.posix.shutdown(fd, .both) catch {};
-            }
+            _ = self.stream.shutdown(.both) catch {};
             tls_client.deinit();
         }
-
-        // std.posix.close panics on EBADF
-        // This is a general issue in Zig:
-        // https://github.com/ziglang/zig/issues/6389
-        //
-        // we don't want to crash on double close
-
-        if (native_os == .windows) {
-            return std.os.windows.CloseHandle(fd);
-        }
-        if (native_os == .wasi and !builtin.link_libc) {
-            _ = std.os.wasi.fd_close(fd);
-            return;
-        }
-        _ = std.posix.system.close(fd);
+        self.stream.close();
     }
 
     pub fn read(self: *Stream, buf: []u8) !usize {
@@ -462,18 +445,19 @@ pub const Stream = struct {
         return self.stream.writeAll(data);
     }
 
-    const zero_timeout = std.mem.toBytes(posix.timeval{ .sec = 0, .usec = 0 });
     pub fn writeTimeout(self: *const Stream, ms: u32) !void {
-        return self.setTimeout(posix.SO.SNDTIMEO, ms);
+        const opt_name = if (comptime builtin.os.tag == .windows) std.os.windows.ws2_32.SO.SNDTIMEO else posix.SO.SNDTIMEO;
+        return self.setTimeout(opt_name, ms);
     }
 
     pub fn readTimeout(self: *const Stream, ms: u32) !void {
-        return self.setTimeout(posix.SO.RCVTIMEO, ms);
+        const opt_name = if (comptime builtin.os.tag == .windows) std.os.windows.ws2_32.SO.RCVTIMEO else posix.SO.RCVTIMEO;
+        return self.setTimeout(opt_name, ms);
     }
 
     fn setTimeout(self: *const Stream, opt_name: u32, ms: u32) !void {
-        if (ms == 0) {
-            return self.setsockopt(opt_name, &zero_timeout);
+        if (comptime builtin.os.tag == .windows) {
+            return;
         }
 
         const timeout = std.mem.toBytes(posix.timeval{
@@ -494,6 +478,9 @@ const TLSClient = struct {
     stream_writer: net.Stream.Writer,
     stream_reader: net.Stream.Reader,
     arena: std.heap.ArenaAllocator,
+    ca_bundle: Bundle = .empty,
+    ca_bundle_lock: std.Io.RwLock = .init,
+    has_ca_bundle: bool = false,
 
     fn init(allocator: Allocator, stream: net.Stream, config: *const Client.Config) !*TLSClient {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -502,8 +489,8 @@ const TLSClient = struct {
         const aa = arena.allocator();
 
         const bundle = config.ca_bundle orelse blk: {
-            var b = Bundle{};
-            try b.rescan(aa);
+            var b = Bundle.empty;
+            try b.rescan(aa, std_compat.io(), std.Io.Timestamp.now(std_compat.io(), .real));
             break :blk b;
         };
 
@@ -523,16 +510,30 @@ const TLSClient = struct {
             .client = undefined,
             .stream_writer = stream.writer(buf.ptr[0..buf_len][0..buf_len]),
             .stream_reader = stream.reader(buf.ptr[buf_len .. 2 * buf_len][0..buf_len]),
+            .ca_bundle = .empty,
+            .ca_bundle_lock = .init,
+            .has_ca_bundle = false,
         };
+        self.ca_bundle = bundle;
+        self.has_ca_bundle = true;
+        var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
+        std_compat.crypto.random.bytes(&entropy);
 
         self.client = try tls.Client.init(
-            self.stream_reader.interface(),
+            &self.stream_reader.interface,
             &self.stream_writer.interface,
             .{
-                .ca = .{ .bundle = bundle },
+                .ca = .{ .bundle = .{
+                    .gpa = aa,
+                    .io = std_compat.io(),
+                    .lock = &self.ca_bundle_lock,
+                    .bundle = &self.ca_bundle,
+                } },
                 .host = .{ .explicit = config.host },
                 .read_buffer = buf.ptr[2 * buf_len .. 3 * buf_len][0..buf_len],
                 .write_buffer = buf.ptr[3 * buf_len .. 4 * buf_len][0..buf_len],
+                .entropy = &entropy,
+                .realtime_now = std.Io.Timestamp.now(std_compat.io(), .real),
             },
         );
 
@@ -550,13 +551,13 @@ fn generateKey() [16]u8 {
         return [16]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
     }
     var key: [16]u8 = undefined;
-    std.crypto.random.bytes(&key);
+    std_compat.crypto.random.bytes(&key);
     return key;
 }
 
 fn generateMask() [4]u8 {
     var m: [4]u8 = undefined;
-    std.crypto.random.bytes(&m);
+    std_compat.crypto.random.bytes(&m);
     return m;
 }
 
@@ -619,7 +620,7 @@ const HandShakeReply = struct {
 
     fn read(buf: []u8, key: []const u8, opts: *const Client.HandshakeOpts, compression: bool, stream: anytype) !HandShakeReply {
         const timeout_ms = opts.timeout_ms;
-        const deadline = std.time.milliTimestamp() + timeout_ms;
+        const deadline = std_compat.time.milliTimestamp() + timeout_ms;
         try stream.readTimeout(timeout_ms);
 
         var pos: usize = 0;
@@ -628,9 +629,12 @@ const HandShakeReply = struct {
         var server_compression: bool = false;
 
         while (true) {
-            const n = stream.read(buf[pos..]) catch |err| switch (err) {
-                error.WouldBlock => return error.Timeout,
-                else => return err,
+            const n = stream.read(buf[pos..]) catch |err| {
+                const read_err: anyerror = err;
+                if (read_err == error.Timeout or read_err == error.WouldBlock) {
+                    return error.Timeout;
+                }
+                return err;
             };
             if (n == 0) {
                 return error.ConnectionClosed;
@@ -714,7 +718,7 @@ const HandShakeReply = struct {
                                     return error.InvalidExtensionHeader;
                                 }
                                 if (!sc.client_no_context_takeover or !sc.server_no_context_takeover) {
-                                    // as of Zig 0.15, we no longer support context takeover
+                                    // Context takeover is currently disabled in this branch.
                                     // We told the server this, it should have respected it.
                                     return error.InvalidExtensionHeader;
                                 }
@@ -727,7 +731,7 @@ const HandShakeReply = struct {
                 }
             }
 
-            if (std.time.milliTimestamp() > deadline) {
+            if (std_compat.time.milliTimestamp() > deadline) {
                 return error.Timeout;
             }
 

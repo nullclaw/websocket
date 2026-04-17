@@ -1,5 +1,5 @@
 # A zig websocket server.
-The master branch targets the latest stable of Zig (0.15.1). The dev branch targets the latest version of Zig. If you're looking for an older version, look for an zig-X.YZ branches.
+The main branch targets Zig 0.16.0. If you're looking for an older version, look for a `zig-X.YZ` branch.
 
 Skip to the [client section](#client).
 
@@ -11,8 +11,7 @@ const std = @import("std");
 const ws = @import("websocket");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
+    const allocator = std.heap.smp_allocator;
 
     var server = try ws.Server(Handler).init(allocator, .{
         .port = 9224,
@@ -423,8 +422,7 @@ The `*websocket.Client` can be used in one of two ways. At its simplest, after c
 
 ```zig
 pub fn main() !void {
-  var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-  const allocator = gpa.allocator();
+  const allocator = std.heap.smp_allocator;
 
   // create the client
   var client = try websocket.Client.init(allocator, .{

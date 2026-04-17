@@ -14,12 +14,9 @@ var nonblocking_server: websocket.Server(Handler) = undefined;
 var nonblocking_bp_server: websocket.Server(Handler) = undefined;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
+    const allocator = std.heap.smp_allocator;
 
     if (@import("builtin").os.tag != .windows) {
-        defer _ = gpa.detectLeaks();
-
         std.posix.sigaction(std.posix.SIG.TERM, &.{
             .handler = .{ .handler = shutdown },
             .mask = std.posix.sigemptyset(),
@@ -53,7 +50,7 @@ fn startNonBlocking(allocator: Allocator) !std.Thread {
             .max_size = 1024,
             .max_headers = 10,
         },
-        // zig 0.15
+        // Compression is temporarily disabled in this branch.
         // .compression = .{
         //     .write_threshold = 0,
         // },
@@ -77,7 +74,7 @@ fn startNonBlockingBufferPool(allocator: Allocator) !std.Thread {
             .max_size = 1024,
             .max_headers = 10,
         },
-        // zig 0.15
+        // Compression is temporarily disabled in this branch.
         // .compression = .{
         //     .write_threshold = 0,
         // },
@@ -102,14 +99,14 @@ const Handler = struct {
                 if (std.unicode.utf8ValidateSlice(data)) {
                     try self.conn.writeText(data);
                 } else {
-                    self.conn.close(.{.code = 1007}) catch {};
+                    self.conn.close(.{ .code = 1007 }) catch {};
                 }
             },
         }
     }
 };
 
-fn shutdown(_: c_int) callconv(.c) void {
+fn shutdown(_: @TypeOf(std.posix.SIG.TERM)) callconv(.c) void {
     nonblocking_server.stop();
     nonblocking_bp_server.stop();
 }
