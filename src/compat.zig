@@ -356,7 +356,7 @@ pub const net = struct {
             try setNonBlocking(stream.socket.handle, false);
             return .{
                 .stream = .{ .handle = stream.socket.handle },
-                .address = self.listen_address,
+                .address = Address.fromCurrent(stream.socket.address),
             };
         }
     };
@@ -391,11 +391,22 @@ pub const net = struct {
         return .{ .handle = stream.socket.handle };
     }
 
+    pub fn tcpConnectToAddresses(addresses: []const Address) !Stream {
+        var last_err: ?anyerror = null;
+        for (addresses) |address| {
+            return tcpConnectToAddress(address) catch |err| {
+                last_err = err;
+                continue;
+            };
+        }
+        return last_err orelse error.UnknownHostName;
+    }
+
     pub fn tcpConnectToHost(allocator: Allocator, host: []const u8, port: u16) !Stream {
         const addresses = try getAddressList(allocator, host, port);
         defer addresses.deinit();
         if (addresses.addrs.len == 0) return error.UnknownHostName;
-        return tcpConnectToAddress(addresses.addrs[0]);
+        return tcpConnectToAddresses(addresses.addrs);
     }
 
     pub fn getAddressList(gpa: Allocator, name: []const u8, port: u16) GetAddressListError!*AddressList {

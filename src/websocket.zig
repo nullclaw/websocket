@@ -1,4 +1,5 @@
 const std = @import("std");
+const compat = @import("compat");
 
 pub const buffer = @import("buffer.zig");
 
@@ -106,4 +107,45 @@ test "frameBin" {
             try t.expectEqual('A', f);
         }
     }
+}
+
+test "compat net.Server.accept returns peer address" {
+    var address = try compat.net.Address.parseIp("127.0.0.1", 0);
+    var listener = try address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const client = try compat.net.tcpConnectToAddress(listener.listen_address);
+    defer client.close();
+
+    var accepted = try listener.accept();
+    defer accepted.stream.close();
+
+    var client_address: compat.net.Address = undefined;
+    var client_address_len: std.posix.socklen_t = @sizeOf(compat.net.Address);
+    switch (std.posix.errno(std.posix.system.getsockname(client.handle, &client_address.any, &client_address_len))) {
+        .SUCCESS => {},
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+
+    try t.expectEqual(client_address.any.family, accepted.address.any.family);
+    try t.expectEqual(client_address.in.sa.addr, accepted.address.in.sa.addr);
+    try t.expectEqual(client_address.in.getPort(), accepted.address.in.getPort());
+    try std.testing.expect(client_address.in.getPort() != listener.listen_address.in.getPort());
+}
+
+test "compat net.tcpConnectToAddresses falls back to a working address" {
+    var address = try compat.net.Address.parseIp("127.0.0.1", 0);
+    var listener = try address.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    const addresses = [_]compat.net.Address{
+        try compat.net.Address.parseIp("::1", listener.listen_address.in.getPort()),
+        listener.listen_address,
+    };
+
+    const client = try compat.net.tcpConnectToAddresses(&addresses);
+    defer client.close();
+
+    var accepted = try listener.accept();
+    defer accepted.stream.close();
 }
