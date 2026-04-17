@@ -19,7 +19,9 @@ const BORDER = "=" ** 80;
 // use in custom panic handler
 var current_test: ?[]const u8 = null;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
+    compat.initProcessMinimal(init);
+
     var mem: [8192]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&mem);
 
@@ -35,7 +37,7 @@ pub fn main() !void {
     var fail: usize = 0;
     var skip: usize = 0;
     var leak: usize = 0;
-    const testing_environ = compat.currentEnviron();
+    const testing_environ = init.environ;
 
     Printer.fmt("\r\x1b[0K", .{}); // beginning of line and clear to end of line
 

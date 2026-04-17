@@ -4,10 +4,15 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 var fallback_threaded: std.Io.Threaded = .init_single_threaded;
+var process_environ: ?std.process.Environ = null;
 
 pub fn io() std.Io {
     if (builtin.is_test) return std.testing.io;
     return fallback_threaded.io();
+}
+
+pub fn initProcessMinimal(init: std.process.Init.Minimal) void {
+    process_environ = init.environ;
 }
 
 pub fn currentEnviron() std.process.Environ {
@@ -16,7 +21,7 @@ pub fn currentEnviron() std.process.Environ {
 
 fn environ() std.process.Environ {
     if (builtin.is_test) return std.testing.environ;
-    return .{ .block = .global };
+    return process_environ orelse .empty;
 }
 
 pub const process = struct {
