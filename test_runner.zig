@@ -19,15 +19,15 @@ const BORDER = "=" ** 80;
 // use in custom panic handler
 var current_test: ?[]const u8 = null;
 
-pub fn main(init: std.process.Init.Minimal) !void {
-    compat.initProcessMinimal(init);
+pub fn main(init: std.process.Init) !void {
+    compat.initProcessMinimal(init.minimal);
 
     var mem: [8192]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&mem);
 
     const allocator = fba.allocator();
 
-    const env = Env.init(allocator);
+    const env = Env.init(allocator, init.environ_map);
     defer env.deinit(allocator);
 
     var slowest = SlowTracker.init(allocator, 5);
@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var fail: usize = 0;
     var skip: usize = 0;
     var leak: usize = 0;
-    const testing_environ = init.environ;
+    const testing_environ = init.minimal.environ;
 
     Printer.fmt("\r\x1b[0K", .{}); // beginning of line and clear to end of line
 
@@ -239,11 +239,11 @@ const Env = struct {
     fail_first: bool,
     filter: ?[]const u8,
 
-    fn init(allocator: Allocator) Env {
+    fn init(allocator: Allocator, environ_map: *const std.process.Environ.Map) Env {
         return .{
-            .verbose = readEnvBool(allocator, "TEST_VERBOSE", true),
-            .fail_first = readEnvBool(allocator, "TEST_FAIL_FIRST", false),
-            .filter = readEnv(allocator, "TEST_FILTER"),
+            .verbose = readEnvBool(allocator, environ_map, "TEST_VERBOSE", true),
+            .fail_first = readEnvBool(allocator, environ_map, "TEST_FAIL_FIRST", false),
+            .filter = readEnv(allocator, environ_map, "TEST_FILTER"),
         };
     }
 
@@ -253,19 +253,25 @@ const Env = struct {
         }
     }
 
-    fn readEnv(allocator: Allocator, key: []const u8) ?[]const u8 {
-        const v = compat.process.getEnvVarOwned(allocator, key) catch |err| {
-            if (err == error.EnvironmentVariableNotFound) {
-                return null;
-            }
-            std.log.warn("failed to get env var {s} due to err {}", .{ key, err });
+    fn readEnv(
+        allocator: Allocator,
+        environ_map: *const std.process.Environ.Map,
+        key: []const u8,
+    ) ?[]const u8 {
+        const value = environ_map.get(key) orelse return null;
+        return allocator.dupe(u8, value) catch |err| {
+            std.log.warn("failed to copy env var {s} due to err {}", .{ key, err });
             return null;
         };
-        return v;
     }
 
-    fn readEnvBool(allocator: Allocator, key: []const u8, deflt: bool) bool {
-        const value = readEnv(allocator, key) orelse return deflt;
+    fn readEnvBool(
+        allocator: Allocator,
+        environ_map: *const std.process.Environ.Map,
+        key: []const u8,
+        deflt: bool,
+    ) bool {
+        const value = readEnv(allocator, environ_map, key) orelse return deflt;
         defer allocator.free(value);
         return std.ascii.eqlIgnoreCase(value, "true");
     }

@@ -20,8 +20,9 @@ pub fn currentEnviron() std.process.Environ {
 }
 
 fn environ() std.process.Environ {
+    if (process_environ) |env| return env;
     if (builtin.is_test) return std.testing.environ;
-    return process_environ orelse .empty;
+    return .empty;
 }
 
 pub const process = struct {
