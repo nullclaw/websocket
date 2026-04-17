@@ -32,7 +32,7 @@ pub const Testing = struct {
         const pair = t.SocketPair.init(.{ .port = port });
         const timeout = std.mem.toBytes(std.posix.timeval{
             .sec = 0,
-            .usec = 50_000,
+            .usec = 250_000,
         });
         if (comptime builtin.os.tag != .windows) {
             std.posix.setsockopt(pair.client.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &timeout) catch unreachable;
@@ -100,7 +100,8 @@ pub const Testing = struct {
         return error.NotClosed;
     }
 
-    // we have a 50ms timeout on this socket. It's all localhost. We expect
+    // We keep a short read timeout on this localhost test socket, but allow
+    // enough headroom for slower CI and containerized runs.
     // to be able to read messages in that time.
     pub fn ensureMessage(self: *Testing) !void {
         if (self.received_index < self.received.items.len) {

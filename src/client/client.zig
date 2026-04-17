@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const proto = @import("../proto.zig");
 const buffer = @import("../buffer.zig");
 const std_compat = @import("compat");
@@ -80,7 +81,7 @@ pub const Client = struct {
 
     pub fn init(allocator: Allocator, config: Config) !Client {
         if (config.compression != null) {
-            log.err("Compression is disabled as part of the 0.15 upgrade. I do hope to re-enable it soon.", .{});
+            log.err("Compression is temporarily disabled in this branch. I do hope to re-enable it soon.", .{});
             return error.InvalidConfiguraion;
         }
 
@@ -124,7 +125,7 @@ pub const Client = struct {
             ._closed = false,
             ._own_bp = own_bp,
             ._mask_fn = config.mask_fn,
-            ._compression_opts = null, //TODO: ZIG 0.15
+            ._compression_opts = null, // TODO: re-enable compression support
             ._reader = Reader.init(reader_buf, buffer_provider, null),
         };
     }
@@ -248,16 +249,21 @@ pub const Client = struct {
                 self.close(.{ .code = 1002 }) catch unreachable;
                 return err;
             } orelse {
-                reader.fill(stream) catch |err| switch (err) {
-                    error.WouldBlock => return null,
-                    error.Closed, error.ConnectionResetByPeer, error.NotOpenForReading => {
-                        @atomicStore(bool, &self._closed, true, .monotonic);
-                        return error.Closed;
-                    },
-                    else => {
-                        self.close(.{ .code = 1002 }) catch unreachable;
-                        return err;
-                    },
+                reader.fill(stream) catch |err| {
+                    const read_err: anyerror = err;
+                    if (read_err == error.Timeout or read_err == error.WouldBlock) {
+                        return null;
+                    }
+                    switch (read_err) {
+                        error.Closed, error.ConnectionResetByPeer, error.NotOpenForReading => {
+                            @atomicStore(bool, &self._closed, true, .monotonic);
+                            return error.Closed;
+                        },
+                        else => {
+                            self.close(.{ .code = 1002 }) catch unreachable;
+                            return err;
+                        },
+                    }
                 };
                 continue;
             };
@@ -406,36 +412,12 @@ pub const Stream = struct {
     }
 
     pub fn close(self: *Stream) void {
-        const fd = self.stream.handle;
-        const builtin = @import("builtin");
-        const native_os = builtin.os.tag;
-
         if (self.tls_client) |tls_client| {
             // Shutdown the socket first, so readLoop() can exit, before tls_client's buffers are freed
-            if (native_os == .windows) {
-                _ = std.os.windows.ws2_32.shutdown(fd, std.os.windows.ws2_32.SD_BOTH);
-            } else if (native_os == .wasi and !builtin.link_libc) {
-                _ = std.os.wasi.sock_shutdown(fd, .{ .WR = true, .RD = true });
-            } else {
-                _ = std.posix.system.shutdown(fd, std.posix.SHUT.RDWR);
-            }
+            _ = self.stream.shutdown(.both) catch {};
             tls_client.deinit();
         }
-
-        // std.posix.close panics on EBADF
-        // This is a general issue in Zig:
-        // https://github.com/ziglang/zig/issues/6389
-        //
-        // we don't want to crash on double close
-
-        if (native_os == .windows) {
-            return std.os.windows.CloseHandle(fd);
-        }
-        if (native_os == .wasi and !builtin.link_libc) {
-            _ = std.os.wasi.fd_close(fd);
-            return;
-        }
-        _ = std.posix.system.close(fd);
+        self.stream.close();
     }
 
     pub fn read(self: *Stream, buf: []u8) !usize {
@@ -463,18 +445,19 @@ pub const Stream = struct {
         return self.stream.writeAll(data);
     }
 
-    const zero_timeout = std.mem.toBytes(posix.timeval{ .sec = 0, .usec = 0 });
     pub fn writeTimeout(self: *const Stream, ms: u32) !void {
-        return self.setTimeout(posix.SO.SNDTIMEO, ms);
+        const opt_name = if (comptime builtin.os.tag == .windows) std.os.windows.ws2_32.SO.SNDTIMEO else posix.SO.SNDTIMEO;
+        return self.setTimeout(opt_name, ms);
     }
 
     pub fn readTimeout(self: *const Stream, ms: u32) !void {
-        return self.setTimeout(posix.SO.RCVTIMEO, ms);
+        const opt_name = if (comptime builtin.os.tag == .windows) std.os.windows.ws2_32.SO.RCVTIMEO else posix.SO.RCVTIMEO;
+        return self.setTimeout(opt_name, ms);
     }
 
     fn setTimeout(self: *const Stream, opt_name: u32, ms: u32) !void {
-        if (ms == 0) {
-            return self.setsockopt(opt_name, &zero_timeout);
+        if (comptime builtin.os.tag == .windows) {
+            return;
         }
 
         const timeout = std.mem.toBytes(posix.timeval{
@@ -646,9 +629,12 @@ const HandShakeReply = struct {
         var server_compression: bool = false;
 
         while (true) {
-            const n = stream.read(buf[pos..]) catch |err| switch (err) {
-                error.WouldBlock => return error.Timeout,
-                else => return err,
+            const n = stream.read(buf[pos..]) catch |err| {
+                const read_err: anyerror = err;
+                if (read_err == error.Timeout or read_err == error.WouldBlock) {
+                    return error.Timeout;
+                }
+                return err;
             };
             if (n == 0) {
                 return error.ConnectionClosed;
@@ -732,7 +718,7 @@ const HandShakeReply = struct {
                                     return error.InvalidExtensionHeader;
                                 }
                                 if (!sc.client_no_context_takeover or !sc.server_no_context_takeover) {
-                                    // as of Zig 0.15, we no longer support context takeover
+                                    // Context takeover is currently disabled in this branch.
                                     // We told the server this, it should have respected it.
                                     return error.InvalidExtensionHeader;
                                 }

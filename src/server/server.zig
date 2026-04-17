@@ -112,7 +112,7 @@ pub fn Server(comptime H: type) type {
             }
 
             if (config.compression != null) {
-                log.err("Compression is disabled as part of the 0.15 upgrade. I do hope to re-enable it soon.", .{});
+                log.err("Compression is temporarily disabled in this branch. I do hope to re-enable it soon.", .{});
                 return error.InvalidConfiguraion;
             }
 
@@ -1440,7 +1440,7 @@ pub const Conn = struct {
     pub fn writeFrame(self: *Conn, op_code: OpCode, data: []const u8) !void {
         const payload = data;
 
-        // Zig 0.15 compression disabled
+        // Compression is temporarily disabled in this branch.
         const compressed = false;
         // if (self.compression) |c| {
         //     if (data.len >= c.write_treshold) {
@@ -1577,23 +1577,13 @@ fn _handleHandshake(comptime H: type, worker: anytype, hc: *HandlerConn(H), ctx:
     }
 
     const n = socketRead(hc.socket, buf[len..]) catch |err| {
-        if (comptime builtin.os.tag == .windows) {
-            switch (err) {
-                error.WouldBlock => {
-                    std.debug.assert(blockingMode());
-                    log.debug("({f}) handshake timeout", .{conn.address});
-                },
-                else => log.warn("({f}) handshake error reading from socket: {}", .{ conn.address, err }),
-            }
-        } else {
-            switch (err) {
-                error.ConnectionResetByPeer => log.debug("({f}) handshake connection closed: {}", .{ conn.address, err }),
-                error.WouldBlock => {
-                    std.debug.assert(blockingMode());
-                    log.debug("({f}) handshake timeout", .{conn.address});
-                },
-                else => log.warn("({f}) handshake error reading from socket: {}", .{ conn.address, err }),
-            }
+        switch (@as(anyerror, err)) {
+            error.ConnectionResetByPeer => log.debug("({f}) handshake connection closed: {}", .{ conn.address, err }),
+            error.Timeout, error.WouldBlock => {
+                std.debug.assert(blockingMode());
+                log.debug("({f}) handshake timeout", .{conn.address});
+            },
+            else => log.warn("({f}) handshake error reading from socket: {}", .{ conn.address, err }),
         }
         return .{ false, false };
     };
@@ -1861,8 +1851,9 @@ fn socketWrite(socket: posix.socket_t, buf: []const u8) !usize {
     if (comptime builtin.os.tag == .windows) {
         return (net.Stream{ .handle = socket }).write(buf);
     }
+    const flags = if (@hasDecl(posix.MSG, "NOSIGNAL")) posix.MSG.NOSIGNAL else 0;
     while (true) {
-        const rc = posix.system.write(socket, buf.ptr, buf.len);
+        const rc = posix.system.sendto(socket, buf.ptr, buf.len, flags, null, 0);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
@@ -2045,7 +2036,7 @@ test "shouldClearReceiveTimeout skips Windows" {
 }
 
 fn testStream(handshake: bool) !net.Stream {
-    const timeout = std.mem.toBytes(std.posix.timeval{ .sec = 0, .usec = 20_000 });
+    const timeout = std.mem.toBytes(std.posix.timeval{ .sec = 0, .usec = 250_000 });
     const address = try net.Address.parseIp("127.0.0.1", 9292);
     const stream = try net.tcpConnectToAddress(address);
     if (comptime builtin.os.tag != .windows) {

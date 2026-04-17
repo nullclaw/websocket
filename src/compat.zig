@@ -109,7 +109,7 @@ pub const net = struct {
         pub const Handle = IoNet.Socket.Handle;
         pub const Reader = IoNet.Stream.Reader;
         pub const Writer = IoNet.Stream.Writer;
-        pub const ReadError = posix.ReadError;
+        pub const ReadError = if (builtin.os.tag == .windows) Reader.Error else posix.ReadError;
         pub const WriteError = IoNet.Stream.Writer.Error;
 
         fn toInner(self: Stream) IoNet.Stream {
@@ -134,6 +134,11 @@ pub const net = struct {
         }
 
         pub fn read(self: Stream, buffer: []u8) ReadError!usize {
+            if (buffer.len == 0) return 0;
+            if (comptime builtin.os.tag == .windows) {
+                var data = [_][]u8{buffer};
+                return io().vtable.netRead(io().userdata, self.handle, &data);
+            }
             return posix.read(self.handle, buffer);
         }
 
@@ -422,6 +427,55 @@ pub const net = struct {
             result.addrs = try arena.dupe(Address, &.{addr});
             return result;
         } else |_| {}
+
+        if (comptime builtin.os.tag == .windows) {
+            const host_name = IoNet.HostName.init(name) catch return error.UnknownHostName;
+            var canonical_name_buffer: [IoNet.HostName.max_len]u8 = undefined;
+            var lookup_buffer: [32]IoNet.HostName.LookupResult = undefined;
+            var lookup_queue: std.Io.Queue(IoNet.HostName.LookupResult) = .init(&lookup_buffer);
+            var lookup_future = io().async(IoNet.HostName.lookup, .{
+                host_name,
+                io(),
+                &lookup_queue,
+                .{
+                    .port = port,
+                    .canonical_name_buffer = &canonical_name_buffer,
+                },
+            });
+            defer lookup_future.cancel(io()) catch {};
+
+            var addrs: std.ArrayList(Address) = .empty;
+            defer addrs.deinit(arena);
+
+            while (lookup_queue.getOne(io())) |lookup_result| switch (lookup_result) {
+                .address => |address| try addrs.append(arena, Address.fromCurrent(address)),
+                .canonical_name => |canonical_name| {
+                    result.canon_name = try arena.dupe(u8, canonical_name.bytes);
+                },
+            } else |err| switch (err) {
+                error.Canceled => return error.Unexpected,
+                error.Closed => {
+                    lookup_future.await(io()) catch |lookup_err| switch (lookup_err) {
+                        error.UnknownHostName, error.NoAddressReturned => return error.UnknownHostName,
+                        error.NameServerFailure => return error.NameServerFailure,
+                        error.AddressFamilyUnsupported => return error.AddressFamilyNotSupported,
+                        error.SystemResources => return error.SystemResources,
+                        error.NetworkDown, error.DetectingNetworkConfigurationFailed => return error.ServiceUnavailable,
+                        error.ResolvConfParseFailed,
+                        error.InvalidDnsARecord,
+                        error.InvalidDnsAAAARecord,
+                        error.InvalidDnsCnameRecord,
+                        error.Canceled,
+                        => return error.Unexpected,
+                        else => return error.Unexpected,
+                    };
+                },
+            }
+
+            result.addrs = try addrs.toOwnedSlice(arena);
+            if (result.addrs.len == 0) return error.UnknownHostName;
+            return result;
+        }
 
         var name_buffer: [IoNet.HostName.max_len:0]u8 = undefined;
         @memcpy(name_buffer[0..name.len], name);
